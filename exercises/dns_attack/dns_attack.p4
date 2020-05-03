@@ -10,6 +10,9 @@ const bit<8>  TYPE_UDP  = 17;
 #define BLOOM_FILTER_ENTRIES 4096
 #define BLOOM_FILTER_BIT_WIDTH 1
 
+// How many bits fit in the query name.
+#define QNAME_LENGTH 56
+// How many bits we can return as a reponse.
 #define DNS_RESPONSE_SIZE 128
 
 /*************************************************************************
@@ -18,41 +21,50 @@ const bit<8>  TYPE_UDP  = 17;
 
 typedef bit<9>  egressSpec_t;
 
-typedef bit<48> MacAddress;
-typedef bit<32> IPv4Address;
-typedef bit<128> IPv6Address;
+typedef bit<48> macAddr_t;
+typedef bit<32> ip4Addr_t;
 
 header ethernet_h {
-    MacAddress dst;
-    MacAddress src;
+    macAddr_t dstAddr;
+    macAddr_t srcAddr;
     bit<16> etherType; 
 }
+
 header ipv4_h {
-    bit<4> version;
-    bit<4> ihl;
-    bit<8> tos;
-    bit<16> len;
-    bit<16> id;
-    bit<3> flags;
-    bit<13> frag;
-    bit<8> ttl;
-    bit<8> proto;
-    bit<16> chksum;
-    IPv4Address src;
-    IPv4Address dst; 
+    bit<4>    version;
+    bit<4>    ihl;
+    bit<8>    diffserv;
+    bit<16>   totalLen;
+    bit<16>   identification;
+    bit<3>    flags;
+    bit<13>   fragOffset;
+    bit<8>    ttl;
+    bit<8>    protocol;
+    bit<16>   hdrChecksum;
+    ip4Addr_t srcAddr;
+    ip4Addr_t dstAddr;
 }
+
 header tcp_h {
-    bit<16> sport;
-    bit<16> dport;
-    bit<32> seq;
-    bit<32> ack;
-    bit<4> dataofs;
-    bit<4> reserved;
-    bit<8> flags;
+    bit<16> srcPort;
+    bit<16> dstPort;
+    bit<32> seqNo;
+    bit<32> ackNo;
+    bit<4>  dataOffset;
+    bit<4>  res;
+    bit<1>  cwr;
+    bit<1>  ece;
+    bit<1>  urg;
+    bit<1>  ack;
+    bit<1>  psh;
+    bit<1>  rst;
+    bit<1>  syn;
+    bit<1>  fin;
     bit<16> window;
-    bit<16> chksum;
-    bit<16> urgptr; 
+    bit<16> checksum;
+    bit<16> urgentPtr;
 }
+
 header udp_h {
     bit<16> sport;
     bit<16> dport;
@@ -99,13 +111,25 @@ header dns_response_h {
     bit<DNS_RESPONSE_SIZE> answer;
 }
 
+// user defined metadata: can be used to share information between
+// TopParser, TopPipe, and TopDeparser 
+struct metadata {
+    bit<1> do_dns;
+    bit<1> recur_desired;
+    bit<1> response_set;
+    bit<1> is_dns;
+    bit<1> is_ip;
+    bit<3> unused;
+}
+
 // List of all recognized headers
-struct Parsed_packet { 
-    ethernet_h ethernet;
-    ipv4_h ipv4;
-    udp_h udp; 
-    dns_query dns;
-    dns_response_h dns_response_fields;
+struct headers { 
+    ethernet_h               ethernet;
+    ipv4_h                   ipv4;
+    tcp_h                    tcp;
+    udp_h                    udp;
+    dns_query                dns;
+    dns_response_h           dns_response_fields;
     dns_question_record_h_48 question_48;
 }
 
@@ -113,7 +137,7 @@ struct Parsed_packet {
 *********************** P A R S E R  ***********************************
 *************************************************************************/
 
-parser MyParser(packet_in packet,
+parser MyParser(packet_in pkt,
                 out headers hdr,
                 inout metadata meta,
                 inout standard_metadata_t standard_metadata) {
@@ -123,7 +147,7 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ethernet {
-        packet.extract(hdr.ethernet);
+        pkt.extract(hdr.ethernet);
         transition select(hdr.ethernet.etherType) {
             TYPE_IPV4: parse_ipv4;
             default: accept;
@@ -131,7 +155,7 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ipv4 {
-        packet.extract(hdr.ipv4);
+        pkt.extract(hdr.ipv4);
         transition select(hdr.ipv4.protocol){
             TYPE_UDP: parse_udp;
             default: accept;
@@ -140,40 +164,42 @@ parser MyParser(packet_in packet,
 
     state parse_udp {
         pkt.extract(hdr.udp);
-
-        transition select(hdr.udp.dport == 53 || hdr.udp.sport == 53) {
-            true: parse_dns_header;
-            false: accept;
-        }
-    }
-
-    state parse_dns_header {
-        pkt.extract(hdr.dns.dns_header);
-        user_metadata.is_dns = 1;
-
-        transition select(hdr.dns.dns_header.q_count) {
-            1: select_dns_length;
-            default: accept;
-        }
-    }
-
-    state select_dns_length {
-        transition select(hdr.ipv4.len) {
-            51: parse_dns_question_56;
-            50: parse_dns_question_48;
-            default: accept;
-        }
-    }
-
-    state parse_dns_question_56 {
-        pkt.extract(hdr.dns.question);
         transition accept;
+
+        // transition select(hdr.udp.dport == 53 || hdr.udp.sport == 53) {
+        //     true: parse_dns_header;
+        //     false: accept;
+            
+        // }
     }
 
-    state parse_dns_question_48 {
-        pkt.extract(hdr.question_48);
-        transition accept;
-    }
+    // state parse_dns_header {
+    //     pkt.extract(hdr.dns.dns_header);
+    //     meta.is_dns = 1;
+
+    //     transition select(hdr.dns.dns_header.q_count) {
+    //         1: select_dns_length;
+    //         default: accept;
+    //     }
+    // }
+
+    // state select_dns_length {
+    //     transition select(hdr.ipv4.totalLen) {
+    //         51: parse_dns_question_56;
+    //         50: parse_dns_question_48;
+    //         default: accept;
+    //     }
+    // }
+
+    // state parse_dns_question_56 {
+    //     pkt.extract(hdr.dns.question);
+    //     transition accept;
+    // }
+
+    // state parse_dns_question_48 {
+    //     pkt.extract(hdr.question_48);
+    //     transition accept;
+    // }
 }
 
 /*************************************************************************

@@ -2,24 +2,13 @@
 #include <core.p4>
 #include <v1model.p4>
 
+/* CONSTANTS */
+
 const bit<16> TYPE_IPV4 = 0x800;
+const bit<8>  TYPE_TCP  = 6;
 
-/* IP protocols */
-const bit<8> IP_PROTOCOLS_ICMP       =   1;
-const bit<8> IP_PROTOCOLS_IGMP       =   2;
-const bit<8> IP_PROTOCOLS_IPV4       =   4;
-const bit<8> IP_PROTOCOLS_TCP        =   6;
-const bit<8> IP_PROTOCOLS_UDP        =  17;
-const bit<8> IP_PROTOCOLS_IPV6       =  41;
-const bit<8> IP_PROTOCOLS_GRE        =  47;
-const bit<8> IP_PROTOCOLS_IPSEC_ESP  =  50;
-const bit<8> IP_PROTOCOLS_IPSEC_AH   =  51;
-const bit<8> IP_PROTOCOLS_ICMPV6     =  58;
-const bit<8> IP_PROTOCOLS_EIGRP      =  88;
-const bit<8> IP_PROTOCOLS_OSPF       =  89;
-const bit<8> IP_PROTOCOLS_PIM        = 103;
-const bit<8> IP_PROTOCOLS_VRRP       = 112;
-
+#define BLOOM_FILTER_ENTRIES 4096
+#define BLOOM_FILTER_BIT_WIDTH 1
 
 /*************************************************************************
 *********************** H E A D E R S  ***********************************
@@ -38,8 +27,7 @@ header ethernet_t {
 header ipv4_t {
     bit<4>    version;
     bit<4>    ihl;
-    bit<6>    diffserv;
-    bit<2>    ecn;
+    bit<8>    diffserv;
     bit<16>   totalLen;
     bit<16>   identification;
     bit<3>    flags;
@@ -51,12 +39,34 @@ header ipv4_t {
     ip4Addr_t dstAddr;
 }
 
+header tcp_t{
+    bit<16> srcPort;
+    bit<16> dstPort;
+    bit<32> seqNo;
+    bit<32> ackNo;
+    bit<4>  dataOffset;
+    bit<4>  res;
+    bit<1>  cwr;
+    bit<1>  ece;
+    bit<1>  urg;
+    bit<1>  ack;
+    bit<1>  psh;
+    bit<1>  rst;
+    bit<1>  syn;
+    bit<1>  fin;
+    bit<16> window;
+    bit<16> checksum;
+    bit<16> urgentPtr;
+}
+
 struct metadata {
+    /* empty */
 }
 
 struct headers {
     ethernet_t   ethernet;
     ipv4_t       ipv4;
+    tcp_t        tcp;
 }
 
 /*************************************************************************
@@ -82,16 +92,23 @@ parser MyParser(packet_in packet,
 
     state parse_ipv4 {
         packet.extract(hdr.ipv4);
-        transition accept;
+        transition select(hdr.ipv4.protocol){
+            TYPE_TCP: tcp;
+            default: accept;
+        }
+    }
+
+    state tcp {
+       packet.extract(hdr.tcp);
+       transition accept;
     }
 }
-
 
 /*************************************************************************
 ************   C H E C K S U M    V E R I F I C A T I O N   *************
 *************************************************************************/
 
-control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
+control MyVerifyChecksum(inout headers hdr, inout metadata meta) {   
     apply {  }
 }
 
@@ -103,8 +120,32 @@ control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
+
+    register<bit<BLOOM_FILTER_BIT_WIDTH>>(BLOOM_FILTER_ENTRIES) bloom_filter_1;
+    register<bit<BLOOM_FILTER_BIT_WIDTH>>(BLOOM_FILTER_ENTRIES) bloom_filter_2;
+    bit<32> reg_pos_one; bit<32> reg_pos_two;
+    bit<1> reg_val_one; bit<1> reg_val_two;
+    bit<1> direction;
+
     action drop() {
         mark_to_drop(standard_metadata);
+    }
+
+    action compute_hashes(ip4Addr_t ipAddr1, ip4Addr_t ipAddr2, bit<16> port1, bit<16> port2){
+       //Get register position
+       hash(reg_pos_one, HashAlgorithm.crc16, (bit<32>)0, {ipAddr1,
+                                                           ipAddr2,
+                                                           port1,
+                                                           port2,
+                                                           hdr.ipv4.protocol},
+                                                           (bit<32>)BLOOM_FILTER_ENTRIES);
+
+       hash(reg_pos_two, HashAlgorithm.crc32, (bit<32>)0, {ipAddr1,
+                                                           ipAddr2,
+                                                           port1,
+                                                           port2,
+                                                           hdr.ipv4.protocol},
+                                                           (bit<32>)BLOOM_FILTER_ENTRIES);
     }
 
     action ipv4_forward(macAddr_t dstAddr, egressSpec_t port) {
@@ -113,83 +154,7 @@ control MyIngress(inout headers hdr,
         hdr.ethernet.dstAddr = dstAddr;
         hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
     }
-
-    /* Default Forwarding */
-    action default_forwarding() {
-        hdr.ipv4.diffserv = 0;
-    }
-
-    /* Expedited Forwarding */
-    action expedited_forwarding() {
-        hdr.ipv4.diffserv = 46;
-    }
-
-    /* Voice Admit */
-    action voice_admit() {
-        hdr.ipv4.diffserv = 44;
-    }
-
-    /* Assured Forwarding */
-    /* Class 1 Low drop probability */
-    action af_11() {
-        hdr.ipv4.diffserv = 10;
-    }
-
-    /* Class 1 Med drop probability */
-    action af_12() {
-        hdr.ipv4.diffserv = 12;
-    }
-
-    /* Class 1 High drop probability */
-    action af_13() {
-        hdr.ipv4.diffserv = 14;
-    }
-
-    /* Class 2 Low drop probability */
-    action af_21() {
-        hdr.ipv4.diffserv = 18;
-    }
-
-    /* Class 2 Med drop probability */
-    action af_22() {
-        hdr.ipv4.diffserv = 20;
-    }
-
-    /* Class 2 High drop probability */
-    action af_23() {
-        hdr.ipv4.diffserv = 22;
-    }
-
-    /* Class 3 Low drop probability */
-    action af_31() {
-        hdr.ipv4.diffserv = 26;
-    }
-
-    /* Class 3 Med drop probability */
-    action af_32() {
-        hdr.ipv4.diffserv = 28;
-    }
-
-    /* Class 3 High drop probability */
-    action af_33() {
-        hdr.ipv4.diffserv = 30;
-    }
-
-    /* Class 4 Low drop probability */
-    action af_41() {
-        hdr.ipv4.diffserv = 34;
-    }
-
-    /* Class 4 Med drop probability */
-    action af_42() {
-        hdr.ipv4.diffserv = 36;
-    }
-
-    /* Class 4 High drop probability */
-    action af_43() {
-        hdr.ipv4.diffserv = 38;
-    }
-
+    
     table ipv4_lpm {
         key = {
             hdr.ipv4.dstAddr: lpm;
@@ -200,18 +165,59 @@ control MyIngress(inout headers hdr,
             NoAction;
         }
         size = 1024;
-        default_action = NoAction();
+        default_action = drop();
     }
 
+    action set_direction(bit<1> dir) {
+        direction = dir;
+    }
+
+    table check_ports {
+        key = {
+            standard_metadata.ingress_port: exact;
+            standard_metadata.egress_spec: exact;
+        }
+        actions = {
+            set_direction;
+            NoAction;
+        }
+        size = 1024;
+        default_action = NoAction();
+    }
+    
     apply {
-        if (hdr.ipv4.isValid()) {
-            if (hdr.ipv4.protocol == IP_PROTOCOLS_UDP) {
-                expedited_forwarding();
-	    }
-            else if (hdr.ipv4.protocol == IP_PROTOCOLS_TCP) {
-	        voice_admit();
-            }
+        if (hdr.ipv4.isValid()){
             ipv4_lpm.apply();
+            if (hdr.tcp.isValid()){
+                direction = 0; // default
+                if (check_ports.apply().hit) {
+                    // test and set the bloom filter
+                    if (direction == 0) {
+                        compute_hashes(hdr.ipv4.srcAddr, hdr.ipv4.dstAddr, hdr.tcp.srcPort, hdr.tcp.dstPort);
+                    }
+                    else {
+                        compute_hashes(hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort);
+                    }
+                    // Packet comes from internal network
+                    if (direction == 0){
+                        // If there is a syn we update the bloom filter and add the entry
+                        if (hdr.tcp.syn == 1){
+                            bloom_filter_1.write(reg_pos_one, 1);
+                            bloom_filter_2.write(reg_pos_two, 1);
+                        }
+                    }
+                    // Packet comes from outside
+                    else if (direction == 1){
+                        // Read bloom filter cells to check if there are 1's
+                        bloom_filter_1.read(reg_val_one, reg_pos_one);
+                        bloom_filter_2.read(reg_val_two, reg_pos_two);
+                        // only allow flow to pass if both entries are set
+                        if (reg_val_one != 1 || reg_val_two != 1){
+                            drop();
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -230,14 +236,13 @@ control MyEgress(inout headers hdr,
 *************   C H E C K S U M    C O M P U T A T I O N   **************
 *************************************************************************/
 
-control MyComputeChecksum(inout headers hdr, inout metadata meta) {
+control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
      apply {
 	update_checksum(
 	    hdr.ipv4.isValid(),
             { hdr.ipv4.version,
 	      hdr.ipv4.ihl,
-	      hdr.ipv4.diffserv,
-	      hdr.ipv4.ecn,
+              hdr.ipv4.diffserv,
               hdr.ipv4.totalLen,
               hdr.ipv4.identification,
               hdr.ipv4.flags,
@@ -259,6 +264,7 @@ control MyDeparser(packet_out packet, in headers hdr) {
     apply {
         packet.emit(hdr.ethernet);
         packet.emit(hdr.ipv4);
+        packet.emit(hdr.tcp);
     }
 }
 

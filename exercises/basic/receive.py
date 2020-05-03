@@ -37,7 +37,7 @@ def handle_pkt(pkt):
     if TCP in pkt and pkt[TCP].dport == 1234:
         print "got a packet"
         pkt.show2()
-    #    hexdump(pkt)
+        #    hexdump(pkt)
         sys.stdout.flush()
 
 

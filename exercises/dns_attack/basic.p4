@@ -12,13 +12,13 @@ typedef bit<9>  egressSpec_t;
 typedef bit<48> macAddr_t;
 typedef bit<32> ip4Addr_t;
 
-header ethernet_t {
+header ethernet_h {
     macAddr_t dstAddr;
     macAddr_t srcAddr;
     bit<16>   etherType;
 }
 
-header ipv4_t {
+header ipv4_h {
     bit<4>    version;
     bit<4>    ihl;
     bit<8>    diffserv;
@@ -38,15 +38,15 @@ struct metadata {
 }
 
 struct headers {
-    ethernet_t   ethernet;
-    ipv4_t       ipv4;
+    ethernet_h   ethernet;
+    ipv4_h       ipv4;
 }
 
 /*************************************************************************
 *********************** P A R S E R  ***********************************
 *************************************************************************/
 
-parser MyParser(packet_in packet,
+parser MyParser(packet_in pkt,
                 out headers hdr,
                 inout metadata meta,
                 inout standard_metadata_t standard_metadata) {
@@ -56,7 +56,7 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ethernet {
-        packet.extract(hdr.ethernet);
+        pkt.extract(hdr.ethernet);
         transition select(hdr.ethernet.etherType) {
             TYPE_IPV4: parse_ipv4;
             default: accept;
@@ -64,7 +64,7 @@ parser MyParser(packet_in packet,
     }
 
     state parse_ipv4 {
-        packet.extract(hdr.ipv4);
+        pkt.extract(hdr.ipv4);
         transition accept;
     }
 
@@ -155,10 +155,10 @@ control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
 ***********************  D E P A R S E R  *******************************
 *************************************************************************/
 
-control MyDeparser(packet_out packet, in headers hdr) {
+control MyDeparser(packet_out pkt, in headers hdr) {
     apply {
-        packet.emit(hdr.ethernet);
-        packet.emit(hdr.ipv4);
+        pkt.emit(hdr.ethernet);
+        pkt.emit(hdr.ipv4);
     }
 }
 

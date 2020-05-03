@@ -4,8 +4,6 @@
 
 /* CONSTANTS */
 
-const bit<16> TYPE_IPV4 = 0x800;
-const bit<8>  TYPE_UDP  = 17;
 
 #define BLOOM_FILTER_ENTRIES 4096
 #define BLOOM_FILTER_BIT_WIDTH 1
@@ -20,14 +18,13 @@ const bit<8>  TYPE_UDP  = 17;
 *************************************************************************/
 
 typedef bit<9>  egressSpec_t;
-
 typedef bit<48> macAddr_t;
 typedef bit<32> ip4Addr_t;
 
 header ethernet_h {
     macAddr_t dstAddr;
     macAddr_t srcAddr;
-    bit<16> etherType; 
+    bit<16>   etherType; 
 }
 
 header ipv4_h {
@@ -111,8 +108,7 @@ header dns_response_h {
     bit<DNS_RESPONSE_SIZE> answer;
 }
 
-// user defined metadata: can be used to share information between
-// TopParser, TopPipe, and TopDeparser 
+// user defined metadata
 struct metadata {
     bit<1> do_dns;
     bit<1> recur_desired;
@@ -149,29 +145,36 @@ parser MyParser(packet_in pkt,
     state parse_ethernet {
         pkt.extract(hdr.ethernet);
         transition select(hdr.ethernet.etherType) {
-            TYPE_IPV4: parse_ipv4;
+            0x800: parse_ipv4;
             default: accept;
         }
     }
 
     state parse_ipv4 {
         pkt.extract(hdr.ipv4);
-        transition select(hdr.ipv4.protocol){
-            TYPE_UDP: parse_udp;
+        transition select(hdr.ipv4.protocol) {
+            8: parse_tcp;
+            17: parse_udp;
             default: accept;
         }
+    }
+
+    state parse_tcp {
+       pkt.extract(hdr.tcp);
+       transition accept;
     }
 
     state parse_udp {
         pkt.extract(hdr.udp);
         transition accept;
-
-        // transition select(hdr.udp.dport == 53 || hdr.udp.sport == 53) {
-        //     true: parse_dns_header;
-        //     false: accept;
-            
-        // }
     }
+
+    //     // transition select(hdr.udp.dport == 53 || hdr.udp.sport == 53) {
+    //     //     true: parse_dns_header;
+    //     //     false: accept;
+            
+    //     // }
+    // }
 
     // state parse_dns_header {
     //     pkt.extract(hdr.dns.dns_header);
@@ -218,9 +221,6 @@ control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
-
-    register<bit<BLOOM_FILTER_BIT_WIDTH>>(BLOOM_FILTER_ENTRIES) bloom_filter_1;
-    register<bit<BLOOM_FILTER_BIT_WIDTH>>(BLOOM_FILTER_ENTRIES) bloom_filter_2;
     bit<32> reg_pos_one; bit<32> reg_pos_two;
     bit<1> reg_val_one; bit<1> reg_val_two;
     bit<1> direction;
@@ -286,7 +286,7 @@ control MyIngress(inout headers hdr,
     apply {
         if (hdr.ipv4.isValid()){
             ipv4_lpm.apply();
-            if (hdr.tcp.isValid()){
+            if (hdr.udp.isValid()){
                 direction = 0; // default
                 if (check_ports.apply().hit) {
                     // test and set the bloom filter
@@ -298,21 +298,21 @@ control MyIngress(inout headers hdr,
                     }
                     // Packet comes from internal network
                     if (direction == 0){
-                        // If there is a syn we update the bloom filter and add the entry
-                        if (hdr.tcp.syn == 1){
-                            bloom_filter_1.write(reg_pos_one, 1);
-                            bloom_filter_2.write(reg_pos_two, 1);
-                        }
+                    //     // If there is a syn we update the bloom filter and add the entry
+                    //     if (hdr.tcp.syn == 1){
+                    //         bloom_filter_1.write(reg_pos_one, 1);
+                    //         bloom_filter_2.write(reg_pos_two, 1);
+                    //     }
                     }
-                    // Packet comes from outside
+                    // // Packet comes from outside
                     else if (direction == 1){
-                        // Read bloom filter cells to check if there are 1's
-                        bloom_filter_1.read(reg_val_one, reg_pos_one);
-                        bloom_filter_2.read(reg_val_two, reg_pos_two);
-                        // only allow flow to pass if both entries are set
-                        if (reg_val_one != 1 || reg_val_two != 1){
-                            drop();
-                        }
+                    //     // Read bloom filter cells to check if there are 1's
+                    //     bloom_filter_1.read(reg_val_one, reg_pos_one);
+                    //     bloom_filter_2.read(reg_val_two, reg_pos_two);
+                    //     // only allow flow to pass if both entries are set
+                    //     if (reg_val_one != 1 || reg_val_two != 1){
+                    //         drop();
+                    //     }
                     }
                 }
             }
@@ -358,11 +358,12 @@ control MyComputeChecksum(inout headers  hdr, inout metadata meta) {
 ***********************  D E P A R S E R  *******************************
 *************************************************************************/
 
-control MyDeparser(packet_out packet, in headers hdr) {
+control MyDeparser(packet_out pkt, in headers hdr) {
     apply {
-        packet.emit(hdr.ethernet);
-        packet.emit(hdr.ipv4);
-        packet.emit(hdr.tcp);
+        pkt.emit(hdr.ethernet);
+        pkt.emit(hdr.ipv4);
+        pkt.emit(hdr.tcp);
+        pkt.emit(hdr.udp);
     }
 }
 

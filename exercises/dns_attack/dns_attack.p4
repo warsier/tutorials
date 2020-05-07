@@ -5,8 +5,10 @@
 /* CONSTANTS */
 
 
-#define BLOOM_FILTER_ENTRIES 4096
-#define BLOOM_FILTER_BIT_WIDTH 1
+#define IP_HASHTABLE_ENTRIES 16
+// threshold should not exceed 2 ^ bit_width
+#define IP_HASHTABLE_BIT_WIDTH 8
+#define IP_HASHTABLE_THRESHOLD 256
 
 // How many bits fit in the query name.
 #define QNAME_LENGTH 56
@@ -63,8 +65,8 @@ header tcp_h {
 }
 
 header udp_h {
-    bit<16> sport;
-    bit<16> dport;
+    bit<16> srcPort;
+    bit<16> dstPort;
     bit<16> len;
     bit<16> chksum; 
 }
@@ -166,43 +168,18 @@ parser MyParser(packet_in pkt,
 
     state parse_udp {
         pkt.extract(hdr.udp);
+        transition select(hdr.udp.dstPort == 53 || hdr.udp.srcPort == 53) {
+            true: parse_dns_header;
+            false: accept;
+        }
+    }
+
+    state parse_dns_header {
+        pkt.extract(hdr.dns.dns_header);
+        meta.is_dns = 1;
         transition accept;
     }
 
-    //     // transition select(hdr.udp.dport == 53 || hdr.udp.sport == 53) {
-    //     //     true: parse_dns_header;
-    //     //     false: accept;
-            
-    //     // }
-    // }
-
-    // state parse_dns_header {
-    //     pkt.extract(hdr.dns.dns_header);
-    //     meta.is_dns = 1;
-
-    //     transition select(hdr.dns.dns_header.q_count) {
-    //         1: select_dns_length;
-    //         default: accept;
-    //     }
-    // }
-
-    // state select_dns_length {
-    //     transition select(hdr.ipv4.totalLen) {
-    //         51: parse_dns_question_56;
-    //         50: parse_dns_question_48;
-    //         default: accept;
-    //     }
-    // }
-
-    // state parse_dns_question_56 {
-    //     pkt.extract(hdr.dns.question);
-    //     transition accept;
-    // }
-
-    // state parse_dns_question_48 {
-    //     pkt.extract(hdr.question_48);
-    //     transition accept;
-    // }
 }
 
 /*************************************************************************
@@ -221,29 +198,27 @@ control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
-    bit<32> reg_pos_one; bit<32> reg_pos_two;
-    bit<1> reg_val_one; bit<1> reg_val_two;
+
+    register<bit<IP_HASHTABLE_BIT_WIDTH>>(IP_HASHTABLE_ENTRIES) ip_hashtable;
+    bit<32> total_request = 0;
+    bit<32> reg_pos;
+    bit<IP_HASHTABLE_BIT_WIDTH> reg_val;
     bit<1> direction;
 
     action drop() {
         mark_to_drop(standard_metadata);
     }
 
-    action compute_hashes(ip4Addr_t ipAddr1, ip4Addr_t ipAddr2, bit<16> port1, bit<16> port2){
-       //Get register position
-       hash(reg_pos_one, HashAlgorithm.crc16, (bit<32>)0, {ipAddr1,
-                                                           ipAddr2,
-                                                           port1,
-                                                           port2,
-                                                           hdr.ipv4.protocol},
-                                                           (bit<32>)BLOOM_FILTER_ENTRIES);
+    action compute_hashes(ip4Addr_t ipAddr, bit<16> port) {
+        //Get register position
+        hash(
+            reg_pos,
+            HashAlgorithm.crc16,
+            (bit<32>) 0,
+            {ipAddr, port},
+            (bit<32>) IP_HASHTABLE_ENTRIES
+        );
 
-       hash(reg_pos_two, HashAlgorithm.crc32, (bit<32>)0, {ipAddr1,
-                                                           ipAddr2,
-                                                           port1,
-                                                           port2,
-                                                           hdr.ipv4.protocol},
-                                                           (bit<32>)BLOOM_FILTER_ENTRIES);
     }
 
     action ipv4_forward(macAddr_t dstAddr, egressSpec_t port) {
@@ -270,6 +245,10 @@ control MyIngress(inout headers hdr,
         direction = dir;
     }
 
+    action set_debug(bit<16> info) {
+        hdr.udp.srcPort = info;
+    }
+
     table check_ports {
         key = {
             standard_metadata.ingress_port: exact;
@@ -282,39 +261,51 @@ control MyIngress(inout headers hdr,
         size = 1024;
         default_action = NoAction();
     }
-    
+
     apply {
         if (hdr.ipv4.isValid()){
             ipv4_lpm.apply();
-            if (hdr.udp.isValid()){
+            if (meta.is_dns == 1) {
                 direction = 0; // default
-                if (check_ports.apply().hit) {
-                    // test and set the bloom filter
-                    if (direction == 0) {
-                        compute_hashes(hdr.ipv4.srcAddr, hdr.ipv4.dstAddr, hdr.tcp.srcPort, hdr.tcp.dstPort);
+                // if packet comes from outside
+                check_ports.apply();
+                // if (check_ports.apply().hit) {
+                    total_request = total_request + 1;
+                    compute_hashes(hdr.ipv4.srcAddr, hdr.udp.srcPort);
+                    ip_hashtable.read(reg_val, reg_pos);
+                    if (reg_val == IP_HASHTABLE_THRESHOLD - 1) {
+                        drop();
                     }
                     else {
-                        compute_hashes(hdr.ipv4.dstAddr, hdr.ipv4.srcAddr, hdr.tcp.dstPort, hdr.tcp.srcPort);
+                        ip_hashtable.write(reg_pos, reg_val + 1);
+                        // (bit<16>) reg_val + 1
+                        set_debug(105);
                     }
-                    // Packet comes from internal network
-                    if (direction == 0){
-                    //     // If there is a syn we update the bloom filter and add the entry
-                    //     if (hdr.tcp.syn == 1){
-                    //         bloom_filter_1.write(reg_pos_one, 1);
-                    //         bloom_filter_2.write(reg_pos_two, 1);
-                    //     }
+                    // reset counter
+                    if (total_request == IP_HASHTABLE_THRESHOLD * 2) {
+                        total_request = 0;
+                        // has to set it by hand since p4 does not support loop
+                        ip_hashtable.write(0, 0);
+                        ip_hashtable.write(1, 0);
+                        ip_hashtable.write(2, 0);
+                        ip_hashtable.write(3, 0);
+
+                        ip_hashtable.write(4, 0);
+                        ip_hashtable.write(5, 0);
+                        ip_hashtable.write(6, 0);
+                        ip_hashtable.write(7, 0);
+
+                        ip_hashtable.write(8, 0);
+                        ip_hashtable.write(9, 0);
+                        ip_hashtable.write(10, 0);
+                        ip_hashtable.write(11, 0);
+
+                        ip_hashtable.write(12, 0);
+                        ip_hashtable.write(13, 0);
+                        ip_hashtable.write(14, 0);
+                        ip_hashtable.write(15, 0);
                     }
-                    // // Packet comes from outside
-                    else if (direction == 1){
-                    //     // Read bloom filter cells to check if there are 1's
-                    //     bloom_filter_1.read(reg_val_one, reg_pos_one);
-                    //     bloom_filter_2.read(reg_val_two, reg_pos_two);
-                    //     // only allow flow to pass if both entries are set
-                    //     if (reg_val_one != 1 || reg_val_two != 1){
-                    //         drop();
-                    //     }
-                    }
-                }
+                // }
             }
         }
     }
@@ -364,6 +355,7 @@ control MyDeparser(packet_out pkt, in headers hdr) {
         pkt.emit(hdr.ipv4);
         pkt.emit(hdr.tcp);
         pkt.emit(hdr.udp);
+        pkt.emit(hdr.dns.dns_header);
     }
 }
 

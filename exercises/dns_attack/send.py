@@ -21,14 +21,14 @@ def get_if():
     return iface
 
 def handle_pkt(pkt):
-    print "got a packet"
+    # print "got a packet"
     pkt.show2()
 
 def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--des", help="IP address of the destination", type=str)
-    parser.add_argument("--dur", help="in seconds", type=str)
+    parser.add_argument("--dur", help="packet count", type=str)
     args = parser.parse_args()
 
     if args.des and args.dur:
@@ -40,9 +40,9 @@ def main():
         pkt.show2()
         try:
             for i in range(int(args.dur)):
-                sendp(pkt, iface=iface)
-                sniff(iface=iface, prn=lambda x: handle_pkt(x))
-                sleep(1)
+                sendp(pkt, iface=iface, verbose=0)
+                # sniff(iface=iface, prn=lambda x: handle_pkt(x))
+            print "total packet sent =", int(args.dur)
         except KeyboardInterrupt:
             raise
 
